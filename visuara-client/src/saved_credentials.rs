@@ -26,13 +26,8 @@ fn credentials_path() -> Result<PathBuf> {
 impl SavedCredentials {
     pub fn save(&self) -> Result<()> {
         let path = credentials_path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
         let json = serde_json::to_vec_pretty(self).context("serialize credentials")?;
-        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
-        restrict_permissions(&path)?;
-        Ok(())
+        crate::local_storage::write_restricted(&path, &json)
     }
 
     pub fn load() -> Result<Option<Self>> {
@@ -51,18 +46,6 @@ impl SavedCredentials {
         }
         Ok(())
     }
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("restrict permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

@@ -42,4 +42,22 @@ impl SignalingClient {
             }
         }
     }
+
+    /// Registers a new account, falling back to logging into an existing one
+    /// if that email is already taken. Shared by the controller and
+    /// dashboard flows, which both just need to end up authenticated.
+    pub async fn authenticate(&mut self, email: &str, password: &str) -> Result<()> {
+        self.send(&ClientMessage::Register { email: email.to_string(), password: password.to_string() }).await?;
+        match self.recv().await? {
+            ServerMessage::AuthOk { .. } => Ok(()),
+            ServerMessage::AuthError { .. } => {
+                self.send(&ClientMessage::Login { email: email.to_string(), password: password.to_string() }).await?;
+                match self.recv().await? {
+                    ServerMessage::AuthOk { .. } => Ok(()),
+                    other => anyhow::bail!("login failed: {other:?}"),
+                }
+            }
+            other => anyhow::bail!("unexpected auth response: {other:?}"),
+        }
+    }
 }

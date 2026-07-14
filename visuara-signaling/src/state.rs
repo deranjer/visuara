@@ -27,9 +27,20 @@ pub struct AppState {
     pub admin_password: Arc<String>,
     /// Session tokens (cookie values) for browsers that have logged into /admin.
     pub admin_sessions: Arc<DashSet<String>>,
-    /// Directory containing pre-built per-platform release binaries, which
-    /// /download/:platform patches with the current settings and serves.
+    /// Session tokens (cookie values) for the public user-facing web app at
+    /// `/`, mapping to (account_id, email) — entirely separate from
+    /// `admin_sessions` and from the WebSocket protocol's own session
+    /// tokens (which are never stored server-side at all).
+    pub user_sessions: Arc<DashMap<String, (i64, String)>>,
+    /// Directory containing manually-placed, pre-built per-platform release
+    /// binaries, which /download/:platform patches with the current settings
+    /// and serves. Wins over `fetched_templates_dir` when both have a file
+    /// for the same platform.
     pub client_templates_dir: Arc<PathBuf>,
+    /// Directory containing binaries auto-fetched from GitHub Releases via
+    /// the admin "check for latest release" button (see `release_fetch`).
+    /// Falls back to this when `client_templates_dir` has no override.
+    pub fetched_templates_dir: Arc<PathBuf>,
 }
 
 #[derive(Clone, Copy)]

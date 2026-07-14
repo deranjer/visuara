@@ -23,11 +23,18 @@ sha1 = "0.10"
 base64 = "0.22"
 anyhow = "1"
 futures-util = "0.3"
+# default-features off, native-tls (vendored) instead of rustls: reqwest
+# 0.13's only rustls option installs aws-lc-rs as the process-wide default
+# rustls CryptoProvider, which is exactly the documented conflict that broke
+# visuara-client's WebRTC/DTLS test when reqwest's default TLS backend got
+# feature-unified into a `cargo test --workspace` build ("Could not
+# automatically determine the process-level CryptoProvider" — two ambiguous
+# rustls providers linked into one test binary). native-tls-vendored uses
+# OpenSSL (vendored, no system package needed, same as this workspace's
+# `openh264` codec dependency) and never touches rustls's provider registry
+# at all, sidestepping the conflict entirely rather than trying to match
+# webrtc-rs's provider choice.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "cookies", "form", "native-tls-vendored"] }
 
 [dev-dependencies]
-# default-features off: the test only talks plain http://, and reqwest's
-# default TLS backend (rustls+aws-lc-rs) otherwise gets feature-unified into
-# every test binary in the workspace, conflicting with webrtc-rs's own
-# rustls crypto provider and panicking visuara-client's WebRTC/DTLS test.
-reqwest = { version = "0.13.4", default-features = false, features = ["cookies", "form"] }
 tokio-tungstenite = "0.24"
