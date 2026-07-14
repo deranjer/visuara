@@ -47,6 +47,7 @@ pub struct VisuaraApp {
     target_device_id: String,
     otp: String,
     selected_monitor_id: Option<u32>,
+    unattended_password: String,
 }
 
 impl VisuaraApp {
@@ -73,6 +74,7 @@ impl VisuaraApp {
             target_device_id: String::new(),
             otp: String::new(),
             selected_monitor_id: None,
+            unattended_password: String::new(),
         }
     }
 
@@ -129,6 +131,58 @@ impl VisuaraApp {
                 ui.label(format!("Device ID: {device_id}"));
                 ui.label(format!("One-time password: {otp}"));
                 ui.label("Waiting for incoming connections...");
+
+                ui.separator();
+                ui.heading("Unattended access");
+                ui.horizontal(|ui| {
+                    ui.label("Fixed password:");
+                    ui.add(egui::TextEdit::singleline(&mut self.unattended_password).password(true));
+                    if ui.button("Set").clicked() && !self.unattended_password.is_empty() {
+                        let server_url = self.server_url.clone();
+                        let email = self.email.clone();
+                        let password = self.password.clone();
+                        let unattended_password = self.unattended_password.clone();
+                        let device_id = device_id.clone();
+                        let shared = self.shared.clone();
+                        self.rt.spawn(async move {
+                            let result = crate::host::set_unattended_password(
+                                &server_url,
+                                &email,
+                                &password,
+                                &device_id,
+                                &unattended_password,
+                            )
+                            .await;
+                            if let Err(e) = result {
+                                shared.lock().unwrap().status = format!("failed to set unattended password: {e:#}");
+                            }
+                        });
+                    }
+                });
+                ui.label("Lets a controller connect to this device without a fresh one-time password.");
+
+                ui.separator();
+                let autostart_enabled = crate::autostart::is_enabled();
+                let toggle_label = if autostart_enabled { "Disable auto-start on login" } else { "Enable auto-start on login" };
+                if ui.button(toggle_label).clicked() {
+                    if autostart_enabled {
+                        if let Err(e) = crate::autostart::disable().and_then(|_| crate::saved_credentials::SavedCredentials::clear()) {
+                            self.shared.lock().unwrap().status = format!("failed to disable auto-start: {e:#}");
+                        }
+                    } else {
+                        let creds = crate::saved_credentials::SavedCredentials {
+                            server_url: self.server_url.clone(),
+                            email: self.email.clone(),
+                            password: self.password.clone(),
+                            device_name: self.device_name.clone(),
+                        };
+                        let result = creds.save().and_then(|_| crate::autostart::enable());
+                        if let Err(e) = result {
+                            self.shared.lock().unwrap().status = format!("failed to enable auto-start: {e:#}");
+                        }
+                    }
+                }
+                ui.label("When enabled, this machine automatically re-shares itself after you log in, using the account above.");
             } else if ui.button("Start sharing").clicked() {
                 let server_url = self.server_url.clone();
                 let email = self.email.clone();
