@@ -78,11 +78,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: linux-x86_64
-          path: dist/linux-x86_64
+          path: dist/linux-download
       - name: Rename to the filenames docker/client-templates expects
         run: |
           mv dist/windows-x86_64/visuara-client.exe dist/windows-x86_64.exe
-          mv dist/linux-x86_64/visuara-client dist/linux-x86_64
+          mv dist/linux-download/visuara-client dist/linux-x86_64
           chmod +x dist/linux-x86_64
       - uses: softprops/action-gh-release@v2
         with:
