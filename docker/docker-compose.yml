@@ -19,6 +19,11 @@ services:
       PORT: 8080
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       CLIENT_TEMPLATES_DIR: /client-templates
+      # Binaries auto-fetched from GitHub Releases via the admin
+      # "check for latest release" button land here instead — under the
+      # writable signaling-data volume, since ./client-templates is
+      # intentionally read-only (see below).
+      FETCHED_TEMPLATES_DIR: /data/client-templates
     volumes:
       - signaling-data:/data
       # Drop pre-built release binaries here, named windows-x86_64.exe /

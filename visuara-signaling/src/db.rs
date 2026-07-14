@@ -21,6 +21,12 @@ pub struct Device {
     pub unattended_password_hash: Option<String>,
 }
 
+pub struct AccountSummary {
+    pub id: i64,
+    pub email: String,
+    pub created_at: i64,
+}
+
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -185,6 +191,38 @@ impl Db {
                 "UPDATE devices SET unattended_password_hash = ?1 WHERE id = ?2",
                 params![hash, device_id],
             )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// For the admin accounts page — every registered account, newest last.
+    pub async fn list_all_accounts(&self) -> Result<Vec<AccountSummary>> {
+        let db = self.0.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AccountSummary>> {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id, email, created_at FROM accounts ORDER BY created_at")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(AccountSummary {
+                        id: row.get(0)?,
+                        email: row.get(1)?,
+                        created_at: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await?
+    }
+
+    /// For the admin accounts page's device-delete action.
+    pub async fn delete_device(&self, device_id: &str) -> Result<()> {
+        let db = self.0.clone();
+        let device_id = device_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM devices WHERE id = ?1", params![device_id])?;
             Ok(())
         })
         .await?

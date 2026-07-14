@@ -15,39 +15,12 @@ use serde::Deserialize;
 use visuara_common::embedded_config::EmbeddedConfig;
 
 use crate::auth;
+use crate::html::{cookie_value, html_escape, page};
+use crate::platforms::{resolve_template_path, PLATFORMS};
 use crate::state::AppState;
+use crate::web;
 
 const ADMIN_COOKIE: &str = "visuara_admin";
-
-struct PlatformInfo {
-    key: &'static str,
-    template_filename: &'static str,
-    download_filename: &'static str,
-    content_type: &'static str,
-}
-
-const PLATFORMS: &[PlatformInfo] = &[
-    PlatformInfo {
-        key: "windows-x86_64",
-        template_filename: "windows-x86_64.exe",
-        download_filename: "visuara.exe",
-        content_type: "application/vnd.microsoft.portable-executable",
-    },
-    PlatformInfo {
-        key: "linux-x86_64",
-        template_filename: "linux-x86_64",
-        download_filename: "visuara",
-        content_type: "application/octet-stream",
-    },
-];
-
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    cookie_header.split(';').find_map(|part| {
-        let (k, v) = part.trim().split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
-}
 
 fn is_admin(headers: &HeaderMap, state: &AppState) -> bool {
     cookie_value(headers, ADMIN_COOKIE)
@@ -55,18 +28,12 @@ fn is_admin(headers: &HeaderMap, state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn html_escape(input: &str) -> String {
-    input.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
-fn page(title: &str, body: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\
-         <style>body{{font-family:sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem}}\
-         input{{display:block;width:100%;padding:.4rem;margin:.3rem 0 1rem}}\
-         button{{padding:.5rem 1rem}}li{{margin:.4rem 0}}</style></head>\
-         <body><h1>{title}</h1>{body}</body></html>"
-    )
+/// Shared nav strip for every logged-in admin page.
+fn admin_nav() -> &'static str {
+    "<nav><a href=\"/admin/settings\">Settings</a>\
+     <a href=\"/admin/client-builds\">Client Builds</a>\
+     <a href=\"/admin/accounts\">Accounts</a>\
+     <a href=\"/admin/logout\">Log out</a></nav><hr>"
 }
 
 fn login_html(error: Option<&str>) -> String {
@@ -86,14 +53,14 @@ fn settings_html(server_url: &str, device_name: &str, notice: Option<&str>) -> S
     page(
         "Visuara Settings",
         &format!(
-            "{notice_html}<form method=\"post\" action=\"/admin/settings\">\
+            "{}{notice_html}<form method=\"post\" action=\"/admin/settings\">\
              <label>Server URL embedded in downloaded clients\
              <input type=\"text\" name=\"server_url\" value=\"{}\" placeholder=\"wss://visuara.example.com/ws\"></label>\
              <label>Default device name\
              <input type=\"text\" name=\"default_device_name\" value=\"{}\" placeholder=\"this-machine\"></label>\
              <button type=\"submit\">Save</button></form>\
-             <p><a href=\"/download\">View public download page</a> &middot; \
-             <a href=\"/admin/logout\">Log out</a></p>",
+             <p><a href=\"/download\">View public download page</a></p>",
+            admin_nav(),
             html_escape(server_url),
             html_escape(device_name),
         ),
@@ -163,24 +130,91 @@ pub async fn save_settings(State(state): State<AppState>, headers: HeaderMap, Fo
     Html(settings_html(server_url, device_name, Some("Saved."))).into_response()
 }
 
-pub async fn download_page(State(state): State<AppState>) -> Html<String> {
+/// Very rough User-Agent sniffing, just enough to suggest the right platform
+/// first on the download page — never used to decide what's servable.
+fn detect_platform(headers: &HeaderMap) -> Option<&'static str> {
+    let ua = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    if ua.contains("Windows") {
+        Some("windows-x86_64")
+    } else if ua.contains("Linux") && !ua.contains("Android") {
+        Some("linux-x86_64")
+    } else {
+        None
+    }
+}
+
+/// Renders "3h ago" / "5d ago" / "just now" from a stored unix-seconds
+/// timestamp, without pulling in a date/time crate for one label.
+fn relative_time(unix_secs: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(unix_secs);
+    let delta = (now - unix_secs).max(0);
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+pub async fn download_page(State(state): State<AppState>, headers: HeaderMap) -> Html<String> {
     let server_url = state.db.get_setting("server_url").await.ok().flatten().unwrap_or_default();
+    let detected = detect_platform(&headers);
+
+    let mut ordered: Vec<_> = PLATFORMS.iter().collect();
+    ordered.sort_by_key(|p| Some(p.key) != detected);
+
     let mut items = String::new();
-    for platform in PLATFORMS {
-        let path = state.client_templates_dir.join(platform.template_filename);
-        if path.exists() {
-            items.push_str(&format!(
-                "<li><a href=\"/download/{}\">{}</a></li>",
-                platform.key, platform.key
-            ));
+    for platform in ordered {
+        let resolved = resolve_template_path(platform, &state.client_templates_dir, &state.fetched_templates_dir);
+        let recommended = if Some(platform.key) == detected {
+            " &mdash; <strong>Recommended for your system</strong>"
         } else {
-            items.push_str(&format!("<li>{} (not available yet)</li>", platform.key));
+            ""
+        };
+        match resolved {
+            Some((_, source)) => {
+                let mut meta = String::new();
+                if source == crate::platforms::TemplateSource::Fetched {
+                    let version = state.db.get_setting(&format!("client_version_{}", platform.key)).await.ok().flatten();
+                    let fetched_at = state
+                        .db
+                        .get_setting(&format!("client_fetched_at_{}", platform.key))
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.parse::<i64>().ok());
+                    if let Some(version) = version {
+                        meta.push_str(&format!(" ({}", html_escape(&version)));
+                        if let Some(ts) = fetched_at {
+                            meta.push_str(&format!(", fetched {}", relative_time(ts)));
+                        }
+                        meta.push(')');
+                    }
+                } else {
+                    meta.push_str(" (custom build)");
+                }
+                items.push_str(&format!(
+                    "<li><a href=\"/download/{}\">{}</a>{}{}</li>",
+                    platform.key, platform.key, meta, recommended
+                ));
+            }
+            None => {
+                items.push_str(&format!("<li>{} (not available yet)</li>", platform.key));
+            }
         }
     }
+    let logged_in = web::current_account(&headers, &state).is_some();
     Html(page(
         "Download Visuara",
         &format!(
-            "<p>Downloads below connect to: <code>{}</code></p><ul>{items}</ul>",
+            "{}<p>Downloads below connect to: <code>{}</code></p><ul>{items}</ul>",
+            web::web_nav(logged_in),
             if server_url.is_empty() { "(not configured yet)".to_string() } else { html_escape(&server_url) }
         ),
     ))
@@ -191,7 +225,11 @@ pub async fn download_platform(State(state): State<AppState>, Path(platform): Pa
         return (StatusCode::NOT_FOUND, "unknown platform").into_response();
     };
 
-    let template_path = state.client_templates_dir.join(info.template_filename);
+    let Some((template_path, _source)) =
+        resolve_template_path(info, &state.client_templates_dir, &state.fetched_templates_dir)
+    else {
+        return (StatusCode::NOT_FOUND, "no build uploaded for this platform yet").into_response();
+    };
     let template = match tokio::fs::read(&template_path).await {
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::NOT_FOUND, "no build uploaded for this platform yet").into_response(),
@@ -213,4 +251,166 @@ pub async fn download_platform(State(state): State<AppState>, Path(platform): Pa
         patched,
     )
         .into_response()
+}
+
+async fn client_builds_html(state: &AppState, notice: Option<&str>) -> String {
+    let notice_html = notice.map(|n| format!("<p>{}</p>", html_escape(n))).unwrap_or_default();
+    let mut rows = String::new();
+    for platform in PLATFORMS {
+        let resolved = resolve_template_path(platform, &state.client_templates_dir, &state.fetched_templates_dir);
+        let status = match resolved {
+            Some((_, crate::platforms::TemplateSource::Manual)) => "manual override".to_string(),
+            Some((_, crate::platforms::TemplateSource::Fetched)) => {
+                let version = state
+                    .db
+                    .get_setting(&format!("client_version_{}", platform.key))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let fetched_at = state
+                    .db
+                    .get_setting(&format!("client_fetched_at_{}", platform.key))
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<i64>().ok());
+                match fetched_at {
+                    Some(ts) => format!("fetched: {} ({})", html_escape(&version), relative_time(ts)),
+                    None => format!("fetched: {}", html_escape(&version)),
+                }
+            }
+            None => "not available".to_string(),
+        };
+        rows.push_str(&format!("<tr><td>{}</td><td>{}</td></tr>", html_escape(platform.key), status));
+    }
+    page(
+        "Client Builds",
+        &format!(
+            "{}{notice_html}<table><tr><th>Platform</th><th>Status</th></tr>{rows}</table>\
+             <form method=\"post\" action=\"/admin/client-builds/fetch\">\
+             <button type=\"submit\">Check GitHub for latest release</button></form>\
+             <p>Fetches from <code>{}</code> into a server-managed directory. A manually-placed \
+             file in the operator's <code>client_templates_dir</code> always takes priority over \
+             a fetched one.</p>",
+            admin_nav(),
+            html_escape(crate::release_fetch::RELEASE_REPO),
+        ),
+    )
+}
+
+pub async fn client_builds_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_admin(&headers, &state) {
+        return Redirect::to("/admin").into_response();
+    }
+    Html(client_builds_html(&state, None).await).into_response()
+}
+
+pub async fn fetch_release(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_admin(&headers, &state) {
+        return Redirect::to("/admin").into_response();
+    }
+    let notice = match crate::release_fetch::fetch_and_store(&state, crate::release_fetch::RELEASE_REPO).await {
+        Ok(results) => {
+            let parts: Vec<String> = results
+                .into_iter()
+                .map(|r| match r.outcome {
+                    Ok(version) => format!("{}: fetched {}", r.platform_key, version),
+                    Err(e) => format!("{}: {e:#}", r.platform_key),
+                })
+                .collect();
+            parts.join(" | ")
+        }
+        Err(e) => format!("failed to check GitHub releases: {e:#}"),
+    };
+    Html(client_builds_html(&state, Some(&notice)).await).into_response()
+}
+
+async fn accounts_html(state: &AppState) -> String {
+    let accounts = state.db.list_all_accounts().await.unwrap_or_default();
+    let mut rows = String::new();
+    for account in accounts {
+        rows.push_str(&format!(
+            "<tr><td><a href=\"/admin/accounts/{}\">{}</a></td><td>{}</td></tr>",
+            account.id,
+            html_escape(&account.email),
+            account.created_at,
+        ));
+    }
+    page(
+        "Accounts",
+        &format!(
+            "{}<table><tr><th>Email</th><th>Created (unix)</th></tr>{rows}</table>",
+            admin_nav()
+        ),
+    )
+}
+
+pub async fn accounts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_admin(&headers, &state) {
+        return Redirect::to("/admin").into_response();
+    }
+    Html(accounts_html(&state).await).into_response()
+}
+
+async fn account_detail_html(state: &AppState, account_id: i64) -> String {
+    let devices = state.db.list_devices_for_account(account_id).await.unwrap_or_default();
+    let mut rows = String::new();
+    for device in devices {
+        let online = state.device_online.contains_key(&device.id);
+        let dot_class = if online { "online" } else { "offline" };
+        let status_label = if online { "online" } else { "offline" };
+        let unattended = if device.unattended_password_hash.is_some() { "yes" } else { "no" };
+        rows.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td>\
+             <td><span class=\"dot {dot_class}\"></span>{status_label}</td><td>{}</td>\
+             <td><form method=\"post\" action=\"/admin/accounts/{}/devices/{}/delete\" \
+             onsubmit=\"return confirm('Delete this device?')\"><button type=\"submit\">Delete</button></form></td></tr>",
+            html_escape(&device.name),
+            html_escape(&device.id),
+            unattended,
+            account_id,
+            device.id,
+        ));
+    }
+    page(
+        "Account Detail",
+        &format!(
+            "{}<table><tr><th>Name</th><th>Device ID</th><th>Status</th><th>Unattended</th><th></th></tr>{rows}</table>\
+             <p><a href=\"/admin/accounts\">Back to accounts</a></p>",
+            admin_nav()
+        ),
+    )
+}
+
+pub async fn account_detail_page(State(state): State<AppState>, headers: HeaderMap, Path(account_id): Path<i64>) -> Response {
+    if !is_admin(&headers, &state) {
+        return Redirect::to("/admin").into_response();
+    }
+    Html(account_detail_html(&state, account_id).await).into_response()
+}
+
+pub async fn delete_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((account_id, device_id)): Path<(i64, String)>,
+) -> Response {
+    if !is_admin(&headers, &state) {
+        return Redirect::to("/admin").into_response();
+    }
+    if let Ok(Some(device)) = state.db.find_device(&device_id).await {
+        if device.account_id == account_id {
+            let _ = state.db.delete_device(&device_id).await;
+            let live_conn = state.device_online.remove(&device_id).map(|(_, conn_id)| conn_id);
+            state.otp.remove(&device_id);
+            if let Some(conn_id) = live_conn {
+                if let Some(tx) = state.connections.get(&conn_id) {
+                    let _ = tx.send(visuara_common::signaling::ServerMessage::Error {
+                        message: "This device was removed by an administrator.".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Redirect::to(&format!("/admin/accounts/{account_id}")).into_response()
 }

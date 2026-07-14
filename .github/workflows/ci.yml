@@ -19,9 +19,10 @@ jobs:
       - run: cargo build --workspace
       - run: cargo test --workspace
 
-  # ubuntu-latest runners are headless (no X server), so screen-capture-
-  # dependent tests can't run here — just compile-check plus everything
-  # that doesn't touch a real display.
+  # ubuntu-latest runners are headless (no X server, no user systemd/dbus
+  # session), so screen-capture-dependent tests and the systemd --user
+  # autostart round trip can't run here — just compile-check plus
+  # everything that doesn't touch a real display or session bus.
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -37,4 +38,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
-      - run: cargo test --workspace -- --skip capture_and_encode_one_frame --skip host_streams_video_and_receives_input
+      - run: cargo test --workspace -- --skip capture_and_encode_one_frame --skip host_streams_video_and_receives_input --skip file_transfer_and_monitor_list_over_a_real_session --skip enable_disable_round_trip

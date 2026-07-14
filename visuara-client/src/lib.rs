@@ -1,5 +1,12 @@
+pub mod autostart;
+pub mod clipboard_sync;
 pub mod controller;
+pub mod dashboard;
+pub mod file_transfer;
 pub mod gui;
 pub mod host;
+pub mod local_settings;
+pub mod local_storage;
+pub mod saved_credentials;
 pub mod session;
 pub mod signaling_client;
