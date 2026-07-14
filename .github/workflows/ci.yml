@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+    branches: [master, develop]
+
+jobs:
+  # windows-latest runners have a real interactive desktop session, so the
+  # full suite (including real screen capture and a real WebRTC session)
+  # runs here.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  # ubuntu-latest runners are headless (no X server), so screen-capture-
+  # dependent tests can't run here — just compile-check plus everything
+  # that doesn't touch a real display.
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies (winit/wgpu/xcap need X11/Wayland/GL dev headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libx11-dev libxrandr-dev libxi-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev \
+            libgbm-dev libegl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace -- --skip capture_and_encode_one_frame --skip host_streams_video_and_receives_input
