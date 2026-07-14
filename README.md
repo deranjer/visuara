@@ -68,7 +68,7 @@ Linux build/runtime notes: capture and input injection target **X11 only** in v1
 Running the binary with no arguments launches the GUI, which has two panels:
 
 - **Host** — enter the account email/password to use for this machine (auto-registers on first use, logs in afterward) and a device name, then **Start sharing**. This shows the device ID and OTP a controller needs, plus controls for [unattended access](#unattended-access).
-- **Connect** — enter the same account's email/password, the target device ID, and its current OTP to view/control that machine.
+- **Connect** — enter the same account's email/password, the target device ID, and its current OTP (or check "use fixed unattended password" and enter that instead) to view/control that machine.
 
 The same binary also has CLI subcommands for scripting/headless use:
 
@@ -78,6 +78,9 @@ visuara-client host --email you@example.com --password ... --device-name my-desk
 
 # Connect to a host by device ID + OTP
 visuara-client controller --email you@example.com --password ... --target-device-id <id> --otp <otp>
+
+# ...or by its fixed unattended password instead of a fresh OTP
+visuara-client controller --email you@example.com --password ... --target-device-id <id> --otp <fixed-password> --unattended
 ```
 
 `--server-url` is optional on both if the binary already has one embedded (see Option A above); otherwise it defaults to `ws://127.0.0.1:8080/ws`.
@@ -86,7 +89,7 @@ visuara-client controller --email you@example.com --password ... --target-device
 
 From the Host panel, once a device is registered, you can:
 - **Enable auto-start on login** — saves the account credentials locally and registers this app to relaunch as a host automatically after you log in (Windows: a per-user `Run` registry entry; Linux: a `systemd --user` unit). This is intentionally lighter than a full OS service: v1 doesn't support controlling the login/lock screen, so a real system-level service that starts before login wouldn't gain anything. A user still has to be logged into a desktop session for the host to be reachable.
-- **Set a fixed password** — stored on the server for this device, intended to let a controller connect without needing a fresh OTP each time. **Not yet usable**: no client currently has a way to connect *with* that password — you'll still need the device's current OTP to connect until that's wired up.
+- **Set a fixed password** — stored on the server for this device, lets a controller connect without needing a fresh OTP each time (GUI: check "use fixed unattended password" on the Connect panel; CLI: pass `--unattended`).
 
 ## Feature scope (v1)
 
