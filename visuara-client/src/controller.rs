@@ -15,10 +15,12 @@ use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirecti
 use webrtc::rtp_transceiver::{RTCRtpTransceiver, RTCRtpTransceiverInit};
 use webrtc::track::track_remote::TrackRemote;
 
+use visuara_agent::clipboard::ClipboardHandle;
 use visuara_agent::decode::VideoDecoder;
-use visuara_common::control::{ControlMessage, InputEvent};
+use visuara_common::control::{ClipboardMessage, ControlMessage, InputEvent, MonitorInfo, MonitorMessage};
 use visuara_common::signaling::{ClientMessage, ConnectCredential, ServerMessage};
 
+use crate::clipboard_sync::ClipboardSync;
 use crate::session::{build_peer_connection, decode_ice_candidate, encode_ice_candidate};
 use crate::signaling_client::SignalingClient;
 
@@ -29,6 +31,12 @@ pub type FrameSender = mpsc::UnboundedSender<image::RgbaImage>;
 pub struct ControllerSession {
     pub data_channel: Arc<RTCDataChannel>,
     pub frames: mpsc::UnboundedReceiver<image::RgbaImage>,
+    /// The host's current monitor list, sent proactively when it connects
+    /// and again whenever requested/switched.
+    pub monitor_updates: mpsc::UnboundedReceiver<Vec<MonitorInfo>>,
+    /// Keeps clipboard sync alive for the lifetime of the session; dropping
+    /// this stops it.
+    pub clipboard_sync: Arc<ClipboardSync>,
 }
 
 pub async fn connect(
@@ -106,6 +114,47 @@ pub async fn connect(
 
     let data_channel = pc.create_data_channel("control", None).await.context("create data channel")?;
 
+    let (monitor_tx, monitor_rx) = mpsc::unbounded_channel::<Vec<MonitorInfo>>();
+    let clipboard_sync = Arc::new({
+        let dc = data_channel.clone();
+        // ClipboardSync's polling thread is a plain std::thread with no
+        // ambient tokio runtime, so on_local_change must spawn via an
+        // explicit Handle rather than the bare tokio::spawn.
+        let rt_handle = tokio::runtime::Handle::current();
+        ClipboardSync::start(
+            || Ok(Box::new(ClipboardHandle::new()?)),
+            move |text| {
+                let dc = dc.clone();
+                rt_handle.spawn(async move {
+                    let msg = ControlMessage::Clipboard(ClipboardMessage::TextUpdated { text });
+                    if let Ok(bytes) = msg.to_bytes() {
+                        let _ = dc.send(&bytes.into()).await;
+                    }
+                });
+            },
+        )
+    });
+    {
+        let clipboard_sync = clipboard_sync.clone();
+        data_channel.on_message(Box::new(move |msg| {
+            let monitor_tx = monitor_tx.clone();
+            let clipboard_sync = clipboard_sync.clone();
+            Box::pin(async move {
+                match ControlMessage::from_bytes(&msg.data) {
+                    Ok(ControlMessage::Clipboard(ClipboardMessage::TextUpdated { text })) => {
+                        clipboard_sync.apply_remote_update(text);
+                    }
+                    Ok(ControlMessage::Monitor(MonitorMessage::List { monitors })) => {
+                        let _ = monitor_tx.send(monitors);
+                    }
+                    Ok(ControlMessage::Monitor(MonitorMessage::Switched { .. })) => {}
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[controller] failed to parse control message: {e:#}"),
+                }
+            })
+        }));
+    }
+
     // We don't send video, only receive it, but the offerer still has to
     // declare a video m-line for the host to answer into.
     pc.add_transceiver_from_kind(
@@ -164,7 +213,7 @@ pub async fn connect(
         }
     });
 
-    Ok(ControllerSession { data_channel, frames: frame_rx })
+    Ok(ControllerSession { data_channel, frames: frame_rx, monitor_updates: monitor_rx, clipboard_sync })
 }
 
 async fn read_video_track(track: Arc<TrackRemote>, frame_tx: mpsc::UnboundedSender<image::RgbaImage>) -> Result<()> {
@@ -194,5 +243,21 @@ async fn read_video_track(track: Arc<TrackRemote>, frame_tx: mpsc::UnboundedSend
 pub async fn send_input(dc: &RTCDataChannel, event: InputEvent) -> Result<()> {
     let bytes = ControlMessage::Input(event).to_bytes().context("encode input event")?;
     dc.send(&bytes.into()).await.context("send input event")?;
+    Ok(())
+}
+
+/// Asks the host to (re-)send its current monitor list.
+pub async fn request_monitor_list(dc: &RTCDataChannel) -> Result<()> {
+    let bytes = ControlMessage::Monitor(MonitorMessage::ListRequest).to_bytes().context("encode request")?;
+    dc.send(&bytes.into()).await.context("send monitor list request")?;
+    Ok(())
+}
+
+/// Asks the host to switch which display it's sharing.
+pub async fn switch_monitor(dc: &RTCDataChannel, monitor_id: u32) -> Result<()> {
+    let bytes = ControlMessage::Monitor(MonitorMessage::SwitchRequest { monitor_id })
+        .to_bytes()
+        .context("encode switch request")?;
+    dc.send(&bytes.into()).await.context("send monitor switch request")?;
     Ok(())
 }

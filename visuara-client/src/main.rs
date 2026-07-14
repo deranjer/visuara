@@ -67,7 +67,15 @@ fn main() -> anyhow::Result<()> {
             let device_name = device_name.or(embedded.device_name).unwrap_or_else(|| "this-machine".to_string());
             runtime.block_on(async move {
                 let input_sink = Box::new(visuara_agent::input::InputInjector::new()?);
-                let handle = register_and_serve(&server_url, &email, &password, &device_name, input_sink).await?;
+                let handle = register_and_serve(
+                    &server_url,
+                    &email,
+                    &password,
+                    &device_name,
+                    input_sink,
+                    visuara_client::file_transfer::FileReceiver::default_destination(),
+                )
+                .await?;
                 println!("Device ID: {}", handle.device_id);
                 println!("One-time password: {}", handle.one_time_password);
                 println!("Waiting for incoming connections. Press Ctrl+C to exit.");

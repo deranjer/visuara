@@ -24,3 +24,20 @@ impl ClipboardHandle {
             .context("write clipboard text")
     }
 }
+
+/// Abstracts clipboard access so sync logic (echo avoidance, polling) can be
+/// unit tested without touching the real OS clipboard.
+pub trait ClipboardBackend: Send {
+    fn get_text(&mut self) -> Result<String>;
+    fn set_text(&mut self, text: &str) -> Result<()>;
+}
+
+impl ClipboardBackend for ClipboardHandle {
+    fn get_text(&mut self) -> Result<String> {
+        ClipboardHandle::get_text(self)
+    }
+
+    fn set_text(&mut self, text: &str) -> Result<()> {
+        ClipboardHandle::set_text(self, text)
+    }
+}
