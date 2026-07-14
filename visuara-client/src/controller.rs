@@ -222,16 +222,32 @@ async fn read_video_track(track: Arc<TrackRemote>, frame_tx: mpsc::UnboundedSend
 
     loop {
         let (packet, _attrs) = track.read_rtp().await.context("read RTP packet")?;
+        // A single dropped/corrupt/out-of-order packet shouldn't kill the
+        // whole session — real networks lose packets. Log and keep going;
+        // the next keyframe recovers the stream.
         let nal = {
             use rtp::packetizer::Depacketizer;
-            depacketizer.depacketize(&packet.payload).context("depacketize H.264 payload")?
+            match depacketizer.depacketize(&packet.payload) {
+                Ok(nal) => nal,
+                Err(e) => {
+                    eprintln!("[controller] dropping malformed H.264 payload: {e:#}");
+                    continue;
+                }
+            }
         };
         if nal.is_empty() {
             continue;
         }
         // H264Packet already emits Annex-B (start-code-prefixed) output, so
         // `nal` is fed to the decoder as-is.
-        if let Some(frame) = decoder.decode(&nal).context("decode H.264 NAL")? {
+        let decoded = match decoder.decode(&nal) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                eprintln!("[controller] dropping frame that failed to decode: {e:#}");
+                continue;
+            }
+        };
+        if let Some(frame) = decoded {
             if frame_tx.send(frame).is_err() {
                 return Ok(());
             }
