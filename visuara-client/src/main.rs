@@ -41,8 +41,14 @@ enum Command {
         password: String,
         #[arg(long)]
         target_device_id: String,
+        /// The device's current one-time password, or its fixed unattended
+        /// password if --unattended is also passed.
         #[arg(long)]
         otp: String,
+        /// Treat `--otp` as the device's fixed unattended password instead
+        /// of a one-time password.
+        #[arg(long)]
+        unattended: bool,
     },
 }
 
@@ -107,17 +113,22 @@ fn main() -> anyhow::Result<()> {
                 Ok::<_, anyhow::Error>(())
             })?;
         }
-        Command::Controller { server_url, email, password, target_device_id, otp } => {
+        Command::Controller { server_url, email, password, target_device_id, otp, unattended } => {
             let server_url = server_url
                 .or(embedded.server_url)
                 .unwrap_or_else(|| "ws://127.0.0.1:8080/ws".to_string());
+            let credential = if unattended {
+                ConnectCredential::UnattendedPassword(otp)
+            } else {
+                ConnectCredential::OneTimePassword(otp)
+            };
             runtime.block_on(async move {
                 let mut session = visuara_client::controller::connect(
                     &server_url,
                     &email,
                     &password,
                     &target_device_id,
-                    ConnectCredential::OneTimePassword(otp),
+                    credential,
                 )
                 .await?;
                 println!("Connected. Waiting for video frames. Press Ctrl+C to exit.");

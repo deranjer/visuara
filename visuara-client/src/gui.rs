@@ -48,6 +48,7 @@ pub struct VisuaraApp {
     otp: String,
     selected_monitor_id: Option<u32>,
     unattended_password: String,
+    use_unattended_password: bool,
 }
 
 impl VisuaraApp {
@@ -75,6 +76,7 @@ impl VisuaraApp {
             otp: String::new(),
             selected_monitor_id: None,
             unattended_password: String::new(),
+            use_unattended_password: false,
         }
     }
 
@@ -238,9 +240,10 @@ impl VisuaraApp {
                     ui.label("Target device ID:");
                     ui.text_edit_singleline(&mut self.target_device_id);
                 });
+                ui.checkbox(&mut self.use_unattended_password, "Use fixed unattended password instead of a one-time password");
                 ui.horizontal(|ui| {
-                    ui.label("One-time password:");
-                    ui.text_edit_singleline(&mut self.otp);
+                    ui.label(if self.use_unattended_password { "Fixed password:" } else { "One-time password:" });
+                    ui.add(egui::TextEdit::singleline(&mut self.otp).password(self.use_unattended_password));
                 });
 
                 if ui.button("Connect").clicked() {
@@ -249,16 +252,14 @@ impl VisuaraApp {
                     let password = self.password.clone();
                     let target = self.target_device_id.clone();
                     let otp = self.otp.clone();
+                    let credential = if self.use_unattended_password {
+                        ConnectCredential::UnattendedPassword(otp)
+                    } else {
+                        ConnectCredential::OneTimePassword(otp)
+                    };
                     let shared = self.shared.clone();
                     self.rt.spawn(async move {
-                        let result = controller::connect(
-                            &server_url,
-                            &email,
-                            &password,
-                            &target,
-                            ConnectCredential::OneTimePassword(otp),
-                        )
-                        .await;
+                        let result = controller::connect(&server_url, &email, &password, &target, credential).await;
                         match result {
                             Ok(session) => {
                                 let controller::ControllerSession {
