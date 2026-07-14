@@ -1,0 +1,56 @@
+# Deploy: docker compose --env-file .env up -d --build
+# See .env.example for the variables this file expects.
+#
+# coturn is intentionally NOT behind Caddy: TURN needs raw UDP relay
+# allocations across a wide port range and has to advertise the server's real
+# public IP in the candidates it hands out, neither of which works through an
+# HTTP/TCP reverse proxy. It runs with host networking instead, so relayed
+# UDP traffic doesn't go through an extra layer of Docker's own NAT.
+services:
+  signaling:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_PATH: /data/visuara.db
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET}
+      TURN_URLS: turn:${PUBLIC_HOST}:3478
+      PORT: 8080
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      CLIENT_TEMPLATES_DIR: /client-templates
+    volumes:
+      - signaling-data:/data
+      # Drop pre-built release binaries here, named windows-x86_64.exe /
+      # linux-x86_64 — see docker/client-templates/README.md. Populated
+      # manually for now; there's no cross-compilation/CI pipeline yet.
+      - ./client-templates:/client-templates:ro
+    networks:
+      - caddy
+    labels:
+      caddy: ${SIGNALING_HOSTNAME}
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --min-port=49152
+      - --max-port=65535
+      - --realm=${PUBLIC_HOST}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET}
+      - --external-ip=${PUBLIC_IP}
+      - --no-cli
+
+volumes:
+  signaling-data:
+
+networks:
+  # Must match the network your existing Caddy container is attached to.
+  caddy:
+    external: true

@@ -1,0 +1,6 @@
+/target
+*.db
+*.sqlite
+.env
+/docker/client-templates/*
+!/docker/client-templates/README.md

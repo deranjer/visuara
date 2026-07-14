@@ -1,0 +1,15 @@
+[package]
+name = "visuara-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1.0.103"
+arboard = "3.6.1"
+enigo = "0.6.1"
+image = "0.25.10"
+openh264 = "0.9.7"
+serde.workspace = true
+tokio.workspace = true
+visuara-common = { path = "../visuara-common" }
+xcap = "0.9.6"
