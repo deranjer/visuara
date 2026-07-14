@@ -329,3 +329,30 @@ async fn handle_one_connection(
         }
     }
 }
+
+/// Sets (or changes) the fixed unattended-access password for a device the
+/// caller's account owns. Opens a short-lived signaling connection just for
+/// this request — separate from the device's own persistent connection.
+pub async fn set_unattended_password(
+    server_url: &str,
+    email: &str,
+    password: &str,
+    target_device_id: &str,
+    unattended_password: &str,
+) -> Result<()> {
+    let mut signaling = SignalingClient::connect(server_url).await?;
+    signaling
+        .send(&ClientMessage::Login { email: email.to_string(), password: password.to_string() })
+        .await?;
+    match signaling.recv().await? {
+        ServerMessage::AuthOk { .. } => {}
+        other => anyhow::bail!("login failed: {other:?}"),
+    }
+    signaling
+        .send(&ClientMessage::SetUnattendedPassword {
+            target_device_id: target_device_id.to_string(),
+            password: unattended_password.to_string(),
+        })
+        .await?;
+    Ok(())
+}

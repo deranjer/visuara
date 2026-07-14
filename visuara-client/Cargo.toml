@@ -27,3 +27,6 @@ dirs = "6.0.0"
 axum = "0.8.9"
 dashmap = "6.2.1"
 visuara-signaling = { path = "../visuara-signaling" }
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use visuara_client::host::register_and_serve;
 use visuara_common::embedded_config::EmbeddedConfig;
@@ -25,6 +26,10 @@ enum Command {
         #[arg(long)]
         device_name: Option<String>,
     },
+    /// Runs as a host using previously-saved credentials, with no
+    /// interactive prompts — used by the per-user autostart entry created
+    /// via the GUI's "enable unattended access" option.
+    HostAutostart,
     /// Run as a controller from the command line: connect to a host device
     /// by ID and OTP.
     Controller {
@@ -79,6 +84,25 @@ fn main() -> anyhow::Result<()> {
                 println!("Device ID: {}", handle.device_id);
                 println!("One-time password: {}", handle.one_time_password);
                 println!("Waiting for incoming connections. Press Ctrl+C to exit.");
+                tokio::signal::ctrl_c().await?;
+                Ok::<_, anyhow::Error>(())
+            })?;
+        }
+        Command::HostAutostart => {
+            runtime.block_on(async move {
+                let creds = visuara_client::saved_credentials::SavedCredentials::load()?
+                    .context("no saved credentials — enable unattended access from the app first")?;
+                let input_sink = Box::new(visuara_agent::input::InputInjector::new()?);
+                let handle = register_and_serve(
+                    &creds.server_url,
+                    &creds.email,
+                    &creds.password,
+                    &creds.device_name,
+                    input_sink,
+                    visuara_client::file_transfer::FileReceiver::default_destination(),
+                )
+                .await?;
+                eprintln!("[visuara] unattended host running, device ID: {}", handle.device_id);
                 tokio::signal::ctrl_c().await?;
                 Ok::<_, anyhow::Error>(())
             })?;
