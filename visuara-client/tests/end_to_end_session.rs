@@ -63,8 +63,9 @@ async fn host_streams_video_and_receives_input() {
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let sink = Box::new(RecordingSink { tx: input_tx });
+    let file_dir = std::env::temp_dir().join(format!("visuara-e2e-received-{}", uuid::Uuid::new_v4()));
 
-    let host_handle = register_and_serve(&server_url, "host@test.local", "hunter2", "test-host", sink)
+    let host_handle = register_and_serve(&server_url, "host@test.local", "hunter2", "test-host", sink, file_dir)
         .await
         .expect("host registration");
 

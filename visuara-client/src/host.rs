@@ -1,6 +1,7 @@
 //! The host role: registers a device with the signaling server, waits for an
 //! incoming connection, negotiates a WebRTC session, then streams captured
-//! screen frames out over a video track and applies incoming input events.
+//! screen frames out over a video track and applies incoming input events,
+//! clipboard updates, monitor switches, and incoming file transfers.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -13,11 +14,14 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc_media::Sample;
 
-use visuara_agent::capture::Capturer;
+use visuara_agent::capture::{list_monitors, Capturer};
+use visuara_agent::clipboard::ClipboardHandle;
 use visuara_agent::encode::VideoEncoder;
-use visuara_common::control::{ControlMessage, InputEvent};
+use visuara_common::control::{ClipboardMessage, ControlMessage, InputEvent, MonitorMessage};
 use visuara_common::signaling::{ClientMessage, ServerMessage};
 
+use crate::clipboard_sync::ClipboardSync;
+use crate::file_transfer::FileReceiver;
 use crate::session::{build_peer_connection, decode_ice_candidate, encode_ice_candidate, make_video_track};
 use crate::signaling_client::SignalingClient;
 
@@ -46,6 +50,7 @@ pub async fn register_and_serve(
     password: &str,
     device_name: &str,
     input_sink: Box<dyn InputSink>,
+    file_receive_dir: std::path::PathBuf,
 ) -> Result<HostHandle> {
     let mut signaling = SignalingClient::connect(server_url).await?;
 
@@ -79,7 +84,7 @@ pub async fn register_and_serve(
     let input_sink = Arc::new(AsyncMutex::new(input_sink));
 
     tokio::spawn(async move {
-        if let Err(e) = serve_connections(signaling, input_sink).await {
+        if let Err(e) = serve_connections(signaling, input_sink, file_receive_dir).await {
             tracing_or_eprintln(&format!("host loop ended: {e:#}"));
         }
     });
@@ -93,7 +98,11 @@ fn tracing_or_eprintln(msg: &str) {
 
 type SharedInputSink = Arc<AsyncMutex<Box<dyn InputSink>>>;
 
-async fn serve_connections(mut signaling: SignalingClient, input_sink: SharedInputSink) -> Result<()> {
+async fn serve_connections(
+    mut signaling: SignalingClient,
+    input_sink: SharedInputSink,
+    file_receive_dir: std::path::PathBuf,
+) -> Result<()> {
     loop {
         let session_id = match signaling.recv().await? {
             ServerMessage::IncomingConnection { session_id, .. } => session_id,
@@ -103,7 +112,7 @@ async fn serve_connections(mut signaling: SignalingClient, input_sink: SharedInp
             }
             _ => continue,
         };
-        handle_one_connection(&mut signaling, &session_id, input_sink.clone()).await?;
+        handle_one_connection(&mut signaling, &session_id, input_sink.clone(), file_receive_dir.clone()).await?;
     }
 }
 
@@ -111,6 +120,7 @@ async fn handle_one_connection(
     signaling: &mut SignalingClient,
     session_id: &str,
     input_sink: SharedInputSink,
+    file_receive_dir: std::path::PathBuf,
 ) -> Result<()> {
     signaling.send(&ClientMessage::RequestTurnCredentials).await?;
     let ice_servers = match signaling.recv().await? {
@@ -143,17 +153,58 @@ async fn handle_one_connection(
         Box::pin(async {})
     }));
 
+    // Monitor switches from the controller reach the blocking capture thread
+    // through this plain channel (it's a std thread, not a tokio task).
+    let (monitor_switch_tx, monitor_switch_rx) = std::sync::mpsc::channel::<u32>();
+    let file_receiver = Arc::new(FileReceiver::new(file_receive_dir)?);
+
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         tracing_or_eprintln("on_data_channel fired");
         let input_sink = input_sink.clone();
+        let file_receiver = file_receiver.clone();
+        let monitor_switch_tx = monitor_switch_tx.clone();
         Box::pin(async move {
-            dc.on_open(Box::new(|| {
+            let dc_for_open = dc.clone();
+            dc.on_open(Box::new(move || {
                 tracing_or_eprintln("data channel open (host side)");
-                Box::pin(async {})
+                let dc = dc_for_open.clone();
+                Box::pin(async move {
+                    if let Ok(monitors) = list_monitors() {
+                        let msg = ControlMessage::Monitor(MonitorMessage::List { monitors });
+                        if let Ok(bytes) = msg.to_bytes() {
+                            let _ = dc.send(&bytes.into()).await;
+                        }
+                    }
+                })
             }));
+
+            let clipboard_sync = Arc::new({
+                let dc = dc.clone();
+                // ClipboardSync's polling thread is a plain std::thread with
+                // no ambient tokio runtime, so on_local_change must spawn
+                // via an explicit Handle rather than the bare tokio::spawn.
+                let rt_handle = tokio::runtime::Handle::current();
+                ClipboardSync::start(
+                    || Ok(Box::new(ClipboardHandle::new()?)),
+                    move |text| {
+                        let dc = dc.clone();
+                        rt_handle.spawn(async move {
+                            let msg = ControlMessage::Clipboard(ClipboardMessage::TextUpdated { text });
+                            if let Ok(bytes) = msg.to_bytes() {
+                                let _ = dc.send(&bytes.into()).await;
+                            }
+                        });
+                    },
+                )
+            });
+
+            let dc_for_messages = dc.clone();
             dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                tracing_or_eprintln(&format!("data channel message received, {} bytes", msg.data.len()));
                 let input_sink = input_sink.clone();
+                let file_receiver = file_receiver.clone();
+                let monitor_switch_tx = monitor_switch_tx.clone();
+                let dc = dc_for_messages.clone();
+                let clipboard_sync = clipboard_sync.clone();
                 Box::pin(async move {
                     match ControlMessage::from_bytes(&msg.data) {
                         Ok(ControlMessage::Input(event)) => {
@@ -162,7 +213,30 @@ async fn handle_one_connection(
                                 tracing_or_eprintln(&format!("failed to apply input event: {e:#}"));
                             }
                         }
-                        Ok(other) => tracing_or_eprintln(&format!("ignoring non-input control message: {other:?}")),
+                        Ok(ControlMessage::Clipboard(ClipboardMessage::TextUpdated { text })) => {
+                            clipboard_sync.apply_remote_update(text);
+                        }
+                        Ok(ControlMessage::File(file_msg)) => {
+                            if let Err(e) = file_receiver.handle(file_msg) {
+                                tracing_or_eprintln(&format!("file transfer error: {e:#}"));
+                            }
+                        }
+                        Ok(ControlMessage::Monitor(MonitorMessage::ListRequest)) => {
+                            if let Ok(monitors) = list_monitors() {
+                                let reply = ControlMessage::Monitor(MonitorMessage::List { monitors });
+                                if let Ok(bytes) = reply.to_bytes() {
+                                    let _ = dc.send(&bytes.into()).await;
+                                }
+                            }
+                        }
+                        Ok(ControlMessage::Monitor(MonitorMessage::SwitchRequest { monitor_id })) => {
+                            let _ = monitor_switch_tx.send(monitor_id);
+                            let reply = ControlMessage::Monitor(MonitorMessage::Switched { monitor_id });
+                            if let Ok(bytes) = reply.to_bytes() {
+                                let _ = dc.send(&bytes.into()).await;
+                            }
+                        }
+                        Ok(other) => tracing_or_eprintln(&format!("ignoring control message: {other:?}")),
                         Err(e) => tracing_or_eprintln(&format!("failed to parse control message: {e:#}")),
                     }
                 })
@@ -195,7 +269,7 @@ async fn handle_one_connection(
     // (a plain Vec<u8>) cross back over a channel.
     let (encoded_tx, mut encoded_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
     tokio::task::spawn_blocking(move || {
-        let capturer = match Capturer::primary() {
+        let mut capturer = match Capturer::primary() {
             Ok(c) => c,
             Err(e) => {
                 tracing_or_eprintln(&format!("capture init failed: {e:#}"));
@@ -210,6 +284,12 @@ async fn handle_one_connection(
             }
         };
         loop {
+            if let Ok(monitor_id) = monitor_switch_rx.try_recv() {
+                match Capturer::for_monitor_id(monitor_id) {
+                    Ok(c) => capturer = c,
+                    Err(e) => tracing_or_eprintln(&format!("switch to monitor {monitor_id} failed: {e:#}")),
+                }
+            }
             let result = capturer
                 .capture_frame()
                 .and_then(|frame| encoder.encode_frame(&frame));

@@ -10,9 +10,10 @@ use std::time::Duration;
 use image::RgbaImage;
 use webrtc::data_channel::RTCDataChannel;
 
+use crate::clipboard_sync::ClipboardSync;
 use crate::controller;
 use crate::host::register_and_serve;
-use visuara_common::control::{InputEvent, KeyCode, MouseButton};
+use visuara_common::control::{InputEvent, KeyCode, MonitorInfo, MouseButton};
 use visuara_common::signaling::ConnectCredential;
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -29,6 +30,9 @@ struct SharedState {
     data_channel: Option<Arc<RTCDataChannel>>,
     latest_frame: Option<RgbaImage>,
     remote_size: Option<(u32, u32)>,
+    monitors: Vec<MonitorInfo>,
+    // Kept alive for as long as the session lasts; dropping it stops sync.
+    _clipboard_sync: Option<Arc<ClipboardSync>>,
 }
 
 pub struct VisuaraApp {
@@ -42,6 +46,7 @@ pub struct VisuaraApp {
     device_name: String,
     target_device_id: String,
     otp: String,
+    selected_monitor_id: Option<u32>,
 }
 
 impl VisuaraApp {
@@ -67,6 +72,7 @@ impl VisuaraApp {
             device_name: embedded.device_name.unwrap_or_else(|| "this-machine".to_string()),
             target_device_id: String::new(),
             otp: String::new(),
+            selected_monitor_id: None,
         }
     }
 
@@ -137,7 +143,8 @@ impl VisuaraApp {
                             return;
                         }
                     };
-                    match register_and_serve(&server_url, &email, &password, &device_name, sink).await {
+                    let dest = crate::file_transfer::FileReceiver::default_destination();
+                    match register_and_serve(&server_url, &email, &password, &device_name, sink, dest).await {
                         Ok(handle) => {
                             shared.lock().unwrap().host_info = Some((handle.device_id, handle.one_time_password));
                         }
@@ -199,9 +206,25 @@ impl VisuaraApp {
                         )
                         .await;
                         match result {
-                            Ok(mut session) => {
-                                shared.lock().unwrap().data_channel = Some(session.data_channel.clone());
-                                while let Some(frame) = session.frames.recv().await {
+                            Ok(session) => {
+                                let controller::ControllerSession {
+                                    data_channel,
+                                    mut frames,
+                                    mut monitor_updates,
+                                    clipboard_sync,
+                                } = session;
+                                {
+                                    let mut s = shared.lock().unwrap();
+                                    s.data_channel = Some(data_channel);
+                                    s._clipboard_sync = Some(clipboard_sync);
+                                }
+                                let shared_for_monitors = shared.clone();
+                                tokio::spawn(async move {
+                                    while let Some(monitors) = monitor_updates.recv().await {
+                                        shared_for_monitors.lock().unwrap().monitors = monitors;
+                                    }
+                                });
+                                while let Some(frame) = frames.recv().await {
                                     let mut s = shared.lock().unwrap();
                                     s.remote_size = Some((frame.width(), frame.height()));
                                     s.latest_frame = Some(frame);
@@ -244,12 +267,50 @@ impl VisuaraApp {
             }
         }
 
+        let monitors = self.shared.lock().unwrap().monitors.clone();
+        if !monitors.is_empty() {
+            if let Some(dc) = &data_channel {
+                ui.horizontal(|ui| {
+                    ui.label("Monitor:");
+                    let current_label = self
+                        .selected_monitor_id
+                        .and_then(|id| monitors.iter().find(|m| m.id == id))
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| "Primary".to_string());
+                    egui::ComboBox::from_id_salt("monitor-select").selected_text(current_label).show_ui(ui, |ui| {
+                        for m in &monitors {
+                            if ui.selectable_label(Some(m.id) == self.selected_monitor_id, &m.name).clicked() {
+                                self.selected_monitor_id = Some(m.id);
+                                let dc = dc.clone();
+                                let monitor_id = m.id;
+                                self.rt.spawn(async move {
+                                    let _ = controller::switch_monitor(&dc, monitor_id).await;
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        }
+
         let Some(texture) = &self.texture else {
             ui.centered_and_justified(|ui| ui.label("Waiting for video..."));
             return;
         };
         let Some((remote_w, remote_h)) = remote_size else { return };
         let Some(dc) = data_channel else { return };
+
+        // Drag-and-drop: send any dropped local files to the host.
+        let dropped_paths: Vec<_> =
+            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        for path in dropped_paths {
+            let dc = dc.clone();
+            self.rt.spawn(async move {
+                if let Err(e) = crate::file_transfer::send_file(&dc, &path).await {
+                    eprintln!("[controller] file send failed: {e:#}");
+                }
+            });
+        }
 
         let available = ui.available_size();
         let response = ui.add(

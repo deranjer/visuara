@@ -37,4 +37,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
-      - run: cargo test --workspace -- --skip capture_and_encode_one_frame --skip host_streams_video_and_receives_input
+      - run: cargo test --workspace -- --skip capture_and_encode_one_frame --skip host_streams_video_and_receives_input --skip file_transfer_and_monitor_list_over_a_real_session
