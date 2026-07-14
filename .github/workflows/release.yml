@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p visuara-client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: target/release/visuara-client.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libx11-dev libxrandr-dev libxi-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev \
+            libgbm-dev libegl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p visuara-client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: target/release/visuara-client
+
+  github-release:
+    needs: [docker, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/windows-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/linux-x86_64
+      - name: Rename to the filenames docker/client-templates expects
+        run: |
+          mv dist/windows-x86_64/visuara-client.exe dist/windows-x86_64.exe
+          mv dist/linux-x86_64/visuara-client dist/linux-x86_64
+          chmod +x dist/linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/windows-x86_64.exe
+            dist/linux-x86_64
+          generate_release_notes: true
