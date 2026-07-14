@@ -53,24 +53,7 @@ pub async fn register_and_serve(
     file_receive_dir: std::path::PathBuf,
 ) -> Result<HostHandle> {
     let mut signaling = SignalingClient::connect(server_url).await?;
-
-    signaling
-        .send(&ClientMessage::Register { email: email.to_string(), password: password.to_string() })
-        .await?;
-    match signaling.recv().await? {
-        ServerMessage::AuthOk { .. } => {}
-        ServerMessage::AuthError { .. } => {
-            // Account likely already exists from a previous run; try logging in.
-            signaling
-                .send(&ClientMessage::Login { email: email.to_string(), password: password.to_string() })
-                .await?;
-            match signaling.recv().await? {
-                ServerMessage::AuthOk { .. } => {}
-                other => anyhow::bail!("login failed: {other:?}"),
-            }
-        }
-        other => anyhow::bail!("unexpected auth response: {other:?}"),
-    }
+    signaling.authenticate(email, password).await?;
 
     signaling
         .send(&ClientMessage::RegisterDevice { name: device_name.to_string() })

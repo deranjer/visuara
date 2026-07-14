@@ -5,22 +5,27 @@
 //! `Mutex`, since eframe's render loop is synchronous.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use image::RgbaImage;
+use tokio::sync::mpsc;
 use webrtc::data_channel::RTCDataChannel;
 
 use crate::clipboard_sync::ClipboardSync;
 use crate::controller;
 use crate::host::register_and_serve;
+use crate::local_settings::{LocalSettings, RememberedLogin};
 use visuara_common::control::{InputEvent, KeyCode, MonitorInfo, MouseButton};
-use visuara_common::signaling::ConnectCredential;
+use visuara_common::signaling::{ConnectCredential, DeviceSummary};
+
+const DASHBOARD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Panel {
     #[default]
     Host,
     Connect,
+    Dashboard,
 }
 
 #[derive(Default)]
@@ -33,6 +38,20 @@ struct SharedState {
     monitors: Vec<MonitorInfo>,
     // Kept alive for as long as the session lasts; dropping it stops sync.
     _clipboard_sync: Option<Arc<ClipboardSync>>,
+    known_devices: Vec<DeviceSummary>,
+    dashboard_refresh_tx: Option<mpsc::UnboundedSender<()>>,
+    dashboard_logged_in: bool,
+    dashboard_status: String,
+}
+
+/// Writes server_url/device_name into the local-settings file so they
+/// persist across launches, without disturbing any remembered login already
+/// stored there. Called after any panel successfully authenticates.
+fn autosave_local_settings(server_url: &str, device_name: &str) {
+    let mut settings = LocalSettings::load().ok().flatten().unwrap_or_default();
+    settings.server_url = Some(server_url.to_string());
+    settings.device_name = Some(device_name.to_string());
+    let _ = settings.save();
 }
 
 pub struct VisuaraApp {
@@ -49,6 +68,8 @@ pub struct VisuaraApp {
     selected_monitor_id: Option<u32>,
     unattended_password: String,
     use_unattended_password: bool,
+    remember_me: bool,
+    last_dashboard_refresh: Instant,
 }
 
 impl VisuaraApp {
@@ -62,21 +83,27 @@ impl VisuaraApp {
             .ok()
             .flatten()
             .unwrap_or_default();
+        // Local settings, when present, capture the user's own edits from a
+        // previous launch and win over the embedded first-run defaults.
+        let local = LocalSettings::load().ok().flatten().unwrap_or_default();
+        let remembered = local.remembered_login.clone();
 
         Self {
             rt,
             shared: Arc::new(Mutex::new(SharedState::default())),
             texture: None,
             panel: Panel::default(),
-            server_url: embedded.server_url.unwrap_or_else(|| "ws://127.0.0.1:8080/ws".to_string()),
-            email: String::new(),
-            password: String::new(),
-            device_name: embedded.device_name.unwrap_or_else(|| "this-machine".to_string()),
+            server_url: local.server_url.or(embedded.server_url).unwrap_or_else(|| "ws://127.0.0.1:8080/ws".to_string()),
+            email: remembered.as_ref().map(|r| r.email.clone()).unwrap_or_default(),
+            password: remembered.as_ref().map(|r| r.password.clone()).unwrap_or_default(),
+            device_name: local.device_name.or(embedded.device_name).unwrap_or_else(|| "this-machine".to_string()),
             target_device_id: String::new(),
             otp: String::new(),
             selected_monitor_id: None,
             unattended_password: String::new(),
             use_unattended_password: false,
+            remember_me: remembered.is_some(),
+            last_dashboard_refresh: Instant::now(),
         }
     }
 
@@ -96,12 +123,22 @@ impl eframe::App for VisuaraApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.panel, Panel::Host, "Host");
                 ui.selectable_value(&mut self.panel, Panel::Connect, "Connect");
+                ui.selectable_value(&mut self.panel, Panel::Dashboard, "My devices");
             });
         });
+
+        if self.panel == Panel::Dashboard {
+            let logged_in = self.shared.lock().unwrap().dashboard_logged_in;
+            if logged_in && self.last_dashboard_refresh.elapsed() >= DASHBOARD_REFRESH_INTERVAL {
+                self.last_dashboard_refresh = Instant::now();
+                self.request_dashboard_refresh();
+            }
+        }
 
         match self.panel {
             Panel::Host => self.show_host_panel(ui),
             Panel::Connect => self.show_connect_panel(ui),
+            Panel::Dashboard => self.show_dashboard_panel(ui),
         }
     }
 }
@@ -202,6 +239,7 @@ impl VisuaraApp {
                     let dest = crate::file_transfer::FileReceiver::default_destination();
                     match register_and_serve(&server_url, &email, &password, &device_name, sink, dest).await {
                         Ok(handle) => {
+                            autosave_local_settings(&server_url, &device_name);
                             shared.lock().unwrap().host_info = Some((handle.device_id, handle.one_time_password));
                         }
                         Err(e) => {
@@ -252,6 +290,7 @@ impl VisuaraApp {
                     let password = self.password.clone();
                     let target = self.target_device_id.clone();
                     let otp = self.otp.clone();
+                    let device_name = self.device_name.clone();
                     let credential = if self.use_unattended_password {
                         ConnectCredential::UnattendedPassword(otp)
                     } else {
@@ -262,6 +301,7 @@ impl VisuaraApp {
                         let result = controller::connect(&server_url, &email, &password, &target, credential).await;
                         match result {
                             Ok(session) => {
+                                autosave_local_settings(&server_url, &device_name);
                                 let controller::ControllerSession {
                                     data_channel,
                                     mut frames,
@@ -304,6 +344,121 @@ impl VisuaraApp {
                     self.show_video_and_capture_input(ui);
                 });
         }
+    }
+
+    fn request_dashboard_refresh(&self) {
+        if let Some(tx) = &self.shared.lock().unwrap().dashboard_refresh_tx {
+            let _ = tx.send(());
+        }
+    }
+
+    fn show_dashboard_panel(&mut self, ui: &mut egui::Ui) {
+        let logged_in = self.shared.lock().unwrap().dashboard_logged_in;
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            if !logged_in {
+                ui.heading("My devices");
+                ui.horizontal(|ui| {
+                    ui.label("Server URL:");
+                    ui.text_edit_singleline(&mut self.server_url);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Email:");
+                    ui.text_edit_singleline(&mut self.email);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Password:");
+                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
+                });
+                ui.checkbox(&mut self.remember_me, "Remember me on this device");
+
+                if ui.button("Log in").clicked() {
+                    let server_url = self.server_url.clone();
+                    let email = self.email.clone();
+                    let password = self.password.clone();
+                    let device_name = self.device_name.clone();
+                    let remember_me = self.remember_me;
+                    let shared = self.shared.clone();
+                    self.rt.spawn(async move {
+                        match crate::dashboard::start(&server_url, &email, &password).await {
+                            Ok(handle) => {
+                                autosave_local_settings(&server_url, &device_name);
+                                if remember_me {
+                                    let mut settings = LocalSettings::load().ok().flatten().unwrap_or_default();
+                                    settings.remembered_login = Some(RememberedLogin { email: email.clone(), password: password.clone() });
+                                    let _ = settings.save();
+                                }
+                                {
+                                    let mut s = shared.lock().unwrap();
+                                    s.dashboard_refresh_tx = Some(handle.refresh_tx);
+                                    s.dashboard_logged_in = true;
+                                    s.dashboard_status.clear();
+                                }
+                                let mut devices_rx = handle.devices_rx;
+                                while let Some(devices) = devices_rx.recv().await {
+                                    shared.lock().unwrap().known_devices = devices;
+                                }
+                                let mut s = shared.lock().unwrap();
+                                s.dashboard_logged_in = false;
+                                s.dashboard_refresh_tx = None;
+                            }
+                            Err(e) => {
+                                shared.lock().unwrap().dashboard_status = format!("log in failed: {e:#}");
+                            }
+                        }
+                    });
+                }
+
+                let status = self.shared.lock().unwrap().dashboard_status.clone();
+                if !status.is_empty() {
+                    ui.colored_label(egui::Color32::RED, status);
+                }
+                return;
+            }
+
+            ui.horizontal(|ui| {
+                ui.heading("My devices");
+                if ui.button("Refresh").clicked() {
+                    self.request_dashboard_refresh();
+                }
+                if ui.button("Log out").clicked() {
+                    let shared = self.shared.clone();
+                    let mut s = shared.lock().unwrap();
+                    s.dashboard_refresh_tx = None;
+                    s.dashboard_logged_in = false;
+                    s.known_devices.clear();
+                    drop(s);
+                    let _ = LocalSettings::clear_remembered_login();
+                    self.remember_me = false;
+                }
+            });
+
+            let devices = self.shared.lock().unwrap().known_devices.clone();
+            if devices.is_empty() {
+                ui.label("No devices registered on this account yet — share a machine from the Host tab.");
+            }
+            for device in devices {
+                ui.horizontal(|ui| {
+                    let dot = if device.online { "\u{25CF}" } else { "\u{25CB}" };
+                    let color = if device.online { egui::Color32::GREEN } else { egui::Color32::GRAY };
+                    ui.colored_label(color, dot);
+                    ui.label(&device.name);
+                    ui.label(format!("({})", device.device_id));
+                    if device.online {
+                        ui.label("online");
+                    } else {
+                        ui.label("offline");
+                    }
+                    if device.unattended_access_enabled {
+                        ui.label("unattended access enabled");
+                    }
+                    if ui.button("Connect").clicked() {
+                        self.target_device_id = device.device_id.clone();
+                        self.panel = Panel::Connect;
+                    }
+                });
+            }
+        });
     }
 
     fn show_video_and_capture_input(&mut self, ui: &mut egui::Ui) {

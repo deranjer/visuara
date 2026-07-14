@@ -46,7 +46,9 @@ async fn spawn_signaling_server() -> String {
         sessions: Arc::new(DashMap::new()),
         admin_password: Arc::new("test-admin-password".to_string()),
         admin_sessions: Arc::new(DashSet::new()),
+        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(PathBuf::from("client-templates")),
+        fetched_templates_dir: Arc::new(PathBuf::from("fetched-client-templates")),
     };
     let app = visuara_signaling::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");

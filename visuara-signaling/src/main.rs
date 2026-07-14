@@ -25,6 +25,9 @@ async fn main() -> anyhow::Result<()> {
         .expect("ADMIN_PASSWORD must be set to protect the /admin settings UI");
     let client_templates_dir = std::env::var("CLIENT_TEMPLATES_DIR")
         .unwrap_or_else(|_| "client-templates".to_string());
+    let fetched_templates_dir = std::env::var("FETCHED_TEMPLATES_DIR")
+        .unwrap_or_else(|_| "fetched-client-templates".to_string());
+    tokio::fs::create_dir_all(&fetched_templates_dir).await?;
 
     let state = AppState {
         db,
@@ -38,7 +41,9 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::new(DashMap::new()),
         admin_password: Arc::new(admin_password),
         admin_sessions: Arc::new(DashSet::new()),
+        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(PathBuf::from(client_templates_dir)),
+        fetched_templates_dir: Arc::new(PathBuf::from(fetched_templates_dir)),
     };
 
     let app = visuara_signaling::build_router(state);

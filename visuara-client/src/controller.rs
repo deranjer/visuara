@@ -47,23 +47,7 @@ pub async fn connect(
     credential: ConnectCredential,
 ) -> Result<ControllerSession> {
     let mut signaling = SignalingClient::connect(server_url).await?;
-
-    signaling
-        .send(&ClientMessage::Register { email: email.to_string(), password: password.to_string() })
-        .await?;
-    match signaling.recv().await? {
-        ServerMessage::AuthOk { .. } => {}
-        ServerMessage::AuthError { .. } => {
-            signaling
-                .send(&ClientMessage::Login { email: email.to_string(), password: password.to_string() })
-                .await?;
-            match signaling.recv().await? {
-                ServerMessage::AuthOk { .. } => {}
-                other => anyhow::bail!("login failed: {other:?}"),
-            }
-        }
-        other => anyhow::bail!("unexpected auth response: {other:?}"),
-    }
+    signaling.authenticate(email, password).await?;
 
     signaling.send(&ClientMessage::RequestTurnCredentials).await?;
     let ice_servers = match signaling.recv().await? {

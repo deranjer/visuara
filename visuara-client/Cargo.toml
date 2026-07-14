@@ -9,7 +9,7 @@ tokio.workspace = true
 visuara-common = { path = "../visuara-common" }
 visuara-agent = { path = "../visuara-agent" }
 webrtc = "0.17.1"
-tokio-tungstenite = "0.30.0"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3.32"
 anyhow = "1.0.103"
 bytes = "1.12.1"

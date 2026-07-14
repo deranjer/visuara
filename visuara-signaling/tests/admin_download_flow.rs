@@ -37,7 +37,9 @@ async fn spawn_test_server(templates_dir: PathBuf) -> String {
         sessions: Arc::new(DashMap::new()),
         admin_password: Arc::new(ADMIN_PASSWORD.to_string()),
         admin_sessions: Arc::new(DashSet::new()),
+        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(templates_dir),
+        fetched_templates_dir: Arc::new(std::env::temp_dir().join(format!("visuara-test-fetched-{}", uuid::Uuid::new_v4()))),
     };
     let app = visuara_signaling::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
