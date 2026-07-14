@@ -7,7 +7,8 @@
 
 use anyhow::{Context, Result};
 use image::RgbaImage;
-use openh264::encoder::Encoder;
+use openh264::OpenH264API;
+use openh264::encoder::{Encoder, EncoderConfig, IntraFramePeriod};
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
 
 pub struct VideoEncoder {
@@ -16,8 +17,18 @@ pub struct VideoEncoder {
 
 impl VideoEncoder {
     pub fn new() -> Result<Self> {
+        // Without a periodic keyframe, the encoder only ever emits SPS/PPS on
+        // the very first frame; if those initial packets are lost (e.g. a
+        // race with ICE/DTLS still stabilizing right as the video track
+        // starts), the decoder has no parameter sets and every subsequent
+        // frame fails to decode for the rest of the session ("OpenH264
+        // encountered an error. Native:16" = dsNoParamSets). A ~3s GOP at the
+        // capture loop's 10fps lets the stream self-heal within a few
+        // seconds instead of staying broken forever.
+        let config = EncoderConfig::new().intra_frame_period(IntraFramePeriod::from_num_frames(30));
         Ok(Self {
-            encoder: Encoder::new().context("initialize H.264 encoder")?,
+            encoder: Encoder::with_api_config(OpenH264API::from_source(), config)
+                .context("initialize H.264 encoder")?,
         })
     }
 
