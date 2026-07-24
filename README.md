@@ -24,7 +24,7 @@ docker compose --env-file .env up -d --build
 ```
 
 This starts two containers:
-- `signaling` — the Visuara server itself (accounts, device registry, pairing, WebRTC signaling, admin UI), reverse-proxied by Caddy at `wss://${SIGNALING_HOSTNAME}`.
+- `signaling` — the Visuara server itself (accounts, device registry, pairing, WebRTC signaling, and the web UI — a React app the server embeds and serves directly), reverse-proxied by Caddy at `wss://${SIGNALING_HOSTNAME}`.
 - `coturn` — a TURN relay for clients that can't connect directly, using host networking and a shared HMAC secret with the signaling server (no separate coturn account setup needed).
 
 Data (the SQLite database) persists in the `signaling-data` Docker volume across restarts/upgrades.
@@ -37,15 +37,22 @@ Data (the SQLite database) persists in the `signaling-data` Docker volume across
 | `PUBLIC_HOST` | Your server's public hostname/IP — used as the coturn realm and in the TURN URL handed to clients. |
 | `PUBLIC_IP` | The real internet-facing IP `coturn` advertises in relay candidates (not a private/LAN address). |
 | `SIGNALING_HOSTNAME` | Hostname Caddy routes to the signaling service, e.g. `visuara.example.com`. |
-| `ADMIN_PASSWORD` | Password for the `/admin` settings UI (see below). Unrelated to end-user accounts. |
 
 Also open/forward UDP port `3478` (STUN/TURN) and the UDP range `49152–65535` (TURN relay allocations) to the server, in addition to whatever port Caddy already uses for HTTPS.
 
-## Getting clients onto machines
+### Admin access
+
+There's no separate admin password. **The first account ever registered through the web UI automatically becomes the admin account**, and public self-service registration closes immediately afterward. From then on, the admin can create additional accounts and/or re-enable public registration from the **Admin** section of the web UI.
+
+> **Upgrading an existing deployment?** If your database already has accounts from before this per-account admin model existed, none of them is flagged as admin. Bootstrap one manually against the running container's database, then log in through the web UI:
+> ```bash
+> docker compose exec signaling sqlite3 /data/visuara.db \
+>   "UPDATE accounts SET role = 'admin' WHERE email = 'you@example.com';"
+> ```
 
 ### Option A: pre-configured downloads (recommended)
 
-Once the server is running, visit `https://<your-signaling-hostname>/admin`, log in with `ADMIN_PASSWORD`, and set a default server URL (and optionally a default device name) under **Settings**. Anyone can then get a ready-to-run client — no typing in a server URL — from the public download page:
+Once the server is running, register the first account (it becomes admin) and set a default server URL (and optionally a default device name) under **Admin → Settings**. Anyone can then get a ready-to-run client — no typing in a server URL — from the public download page:
 
 ```
 https://<your-signaling-hostname>/download
@@ -103,8 +110,14 @@ From the Host panel, once a device is registered, you can:
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching model (GitFlow) and how releases are cut. Quick start for local development:
 
 ```bash
+# visuara-signaling embeds the built web UI into its binary, so build that first
+npm --prefix web ci
+npm --prefix web run build
+
 cargo build --workspace
 cargo test --workspace
 ```
 
-The workspace has four crates: `visuara-common` (shared wire protocol), `visuara-signaling` (the server), `visuara-agent` (capture/input/encode/decode), and `visuara-client` (the GUI + CLI, links the other two).
+See [web/README.md](web/README.md) for the web UI's own dev loop (Vite dev server with hot-reload against a live `cargo run` backend).
+
+The workspace has four crates: `visuara-common` (shared wire protocol), `visuara-signaling` (the server, embedding and serving the `web/` React app), `visuara-agent` (capture/input/encode/decode), and `visuara-client` (the GUI + CLI, links the other two).

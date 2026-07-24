@@ -1,4 +1,4 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,15 +23,6 @@ pub struct AppState {
     /// Active pairing sessions, mapping session_id to the two connections
     /// that should have SDP/ICE messages relayed between them.
     pub sessions: Arc<DashMap<SessionId, SessionPeers>>,
-    /// Fixed operator password gating the /admin settings UI.
-    pub admin_password: Arc<String>,
-    /// Session tokens (cookie values) for browsers that have logged into /admin.
-    pub admin_sessions: Arc<DashSet<String>>,
-    /// Session tokens (cookie values) for the public user-facing web app at
-    /// `/`, mapping to (account_id, email) — entirely separate from
-    /// `admin_sessions` and from the WebSocket protocol's own session
-    /// tokens (which are never stored server-side at all).
-    pub user_sessions: Arc<DashMap<String, (i64, String)>>,
     /// Directory containing manually-placed, pre-built per-platform release
     /// binaries, which /download/:platform patches with the current settings
     /// and serves. Wins over `fetched_templates_dir` when both have a file

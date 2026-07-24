@@ -9,7 +9,7 @@
 //! mouse — the host's InputSink is a no-op recorder as elsewhere.
 
 use anyhow::Result;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,9 +37,6 @@ async fn spawn_signaling_server() -> String {
         device_online: Arc::new(DashMap::new()),
         otp: Arc::new(DashMap::new()),
         sessions: Arc::new(DashMap::new()),
-        admin_password: Arc::new("test-admin-password".to_string()),
-        admin_sessions: Arc::new(DashSet::new()),
-        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(PathBuf::from("client-templates")),
         fetched_templates_dir: Arc::new(PathBuf::from("fetched-client-templates")),
     };
@@ -50,6 +47,29 @@ async fn spawn_signaling_server() -> String {
         axum::serve(listener, app).await.unwrap();
     });
     format!("ws://127.0.0.1:{port}/ws")
+}
+
+/// Logs into the signaling server's HTTP API as `email`/`password` and
+/// flips the `registration_enabled` setting back on — needed because the
+/// first account ever registered becomes admin and auto-disables public
+/// registration (see visuara-signaling's `session::create_account_and_maybe_bootstrap_admin`).
+async fn reenable_registration(ws_server_url: &str, email: &str, password: &str) {
+    let base_url = ws_server_url.replacen("ws://", "http://", 1).trim_end_matches("/ws").to_string();
+    let http = reqwest::Client::builder().cookie_store(true).build().expect("build http client");
+    let resp = http
+        .post(format!("{base_url}/api/v1/auth/login"))
+        .json(&serde_json::json!({ "email": email, "password": password }))
+        .send()
+        .await
+        .expect("admin login");
+    assert_eq!(resp.status(), 200);
+    let resp = http
+        .put(format!("{base_url}/api/v1/admin/registration"))
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await
+        .expect("re-enable registration");
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]
@@ -67,6 +87,8 @@ async fn file_transfer_and_monitor_list_over_a_real_session() {
     )
     .await
     .expect("host registration");
+
+    reenable_registration(&server_url, "host@test.local", "hunter2").await;
 
     let mut session = tokio::time::timeout(
         Duration::from_secs(30),

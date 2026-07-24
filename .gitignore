@@ -4,3 +4,6 @@
 .env
 /docker/client-templates/*
 !/docker/client-templates/README.md
+/web/node_modules
+/web/dist
+/web/*.tsbuildinfo

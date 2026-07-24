@@ -35,6 +35,7 @@ futures-util = "0.3"
 # at all, sidestepping the conflict entirely rather than trying to match
 # webrtc-rs's provider choice.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "cookies", "form", "native-tls-vendored"] }
+rust-embed = { version = "8", features = ["mime-guess", "compression"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
