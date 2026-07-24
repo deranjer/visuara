@@ -17,7 +17,6 @@ services:
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET}
       TURN_URLS: turn:${PUBLIC_HOST}:3478
       PORT: 8080
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       CLIENT_TEMPLATES_DIR: /client-templates
       # Binaries auto-fetched from GitHub Releases via the admin
       # "check for latest release" button land here instead — under the

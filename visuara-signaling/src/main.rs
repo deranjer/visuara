@@ -1,4 +1,4 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,8 +21,6 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| s.trim().to_string())
         .collect();
 
-    let admin_password = std::env::var("ADMIN_PASSWORD")
-        .expect("ADMIN_PASSWORD must be set to protect the /admin settings UI");
     let client_templates_dir = std::env::var("CLIENT_TEMPLATES_DIR")
         .unwrap_or_else(|_| "client-templates".to_string());
     let fetched_templates_dir = std::env::var("FETCHED_TEMPLATES_DIR")
@@ -39,9 +37,6 @@ async fn main() -> anyhow::Result<()> {
         device_online: Arc::new(DashMap::new()),
         otp: Arc::new(DashMap::new()),
         sessions: Arc::new(DashMap::new()),
-        admin_password: Arc::new(admin_password),
-        admin_sessions: Arc::new(DashSet::new()),
-        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(PathBuf::from(client_templates_dir)),
         fetched_templates_dir: Arc::new(PathBuf::from(fetched_templates_dir)),
     };

@@ -91,9 +91,15 @@ async fn handle_message(
 ) -> anyhow::Result<()> {
     match msg {
         ClientMessage::Register { email, password } => {
+            if !state.db.registration_enabled().await.unwrap_or(true) {
+                tx.send(ServerMessage::AuthError {
+                    message: "registration is currently disabled".into(),
+                })?;
+                return Ok(());
+            }
             let hash = auth::hash_password(&password)?;
-            match state.db.create_account(&email, &hash).await {
-                Ok(account_id) => {
+            match crate::session::create_account_and_maybe_bootstrap_admin(&state.db, &email, &hash).await {
+                Ok((account_id, _role)) => {
                     *conn_state = ConnState::Authenticated { account_id };
                     tx.send(ServerMessage::AuthOk {
                         session_token: auth::generate_session_token(),
