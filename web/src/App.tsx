@@ -1,7 +1,7 @@
 import { Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './auth/AuthContext';
 import { RequireAdmin, RequireAuth } from './auth/RouteGuards';
-import { Nav } from './components/Nav';
+import { AppLayout } from './components/AppLayout';
 import { AccountDetailPage } from './pages/admin/AccountDetailPage';
 import { AccountsPage } from './pages/admin/AccountsPage';
 import { AdminLayout } from './pages/admin/AdminLayout';
@@ -16,26 +16,27 @@ import { RegisterPage } from './pages/RegisterPage';
 export function App() {
   return (
     <AuthProvider>
-      <Nav />
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/register" element={<RegisterPage />} />
-        <Route path="/download" element={<DownloadPage />} />
+      <AppLayout>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/download" element={<DownloadPage />} />
 
-        <Route element={<RequireAuth />}>
-          <Route path="/" element={<DashboardPage />} />
-        </Route>
-
-        <Route element={<RequireAdmin />}>
-          <Route path="/admin" element={<AdminLayout />}>
-            <Route path="settings" element={<SettingsPage />} />
-            <Route path="client-builds" element={<ClientBuildsPage />} />
-            <Route path="accounts" element={<AccountsPage />} />
-            <Route path="accounts/:id" element={<AccountDetailPage />} />
-            <Route path="registration" element={<RegistrationPage />} />
+          <Route element={<RequireAuth />}>
+            <Route path="/" element={<DashboardPage />} />
           </Route>
-        </Route>
-      </Routes>
+
+          <Route element={<RequireAdmin />}>
+            <Route path="/admin" element={<AdminLayout />}>
+              <Route path="settings" element={<SettingsPage />} />
+              <Route path="client-builds" element={<ClientBuildsPage />} />
+              <Route path="accounts" element={<AccountsPage />} />
+              <Route path="accounts/:id" element={<AccountDetailPage />} />
+              <Route path="registration" element={<RegistrationPage />} />
+            </Route>
+          </Route>
+        </Routes>
+      </AppLayout>
     </AuthProvider>
   );
 }
