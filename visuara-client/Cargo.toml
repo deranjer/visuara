@@ -27,6 +27,11 @@ dirs = "6.0.0"
 axum = "0.8.9"
 dashmap = "6.2.1"
 visuara-signaling = { path = "../visuara-signaling" }
+# See visuara-signaling/Cargo.toml's comment on its own reqwest dependency:
+# same default-features-off + native-tls-vendored configuration here, to
+# avoid the same rustls-CryptoProvider conflict with webrtc-rs's DTLS stack
+# when both link into one `cargo test --workspace` test binary.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "cookies", "native-tls-vendored"] }
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"

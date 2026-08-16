@@ -3,7 +3,7 @@
 //! registration, pairing by one-time password, SDP/ICE relay, TURN
 //! credential issuance, and unattended-password push.
 
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,9 +30,6 @@ async fn spawn_test_server() -> u16 {
         device_online: Arc::new(DashMap::new()),
         otp: Arc::new(DashMap::new()),
         sessions: Arc::new(DashMap::new()),
-        admin_password: Arc::new("test-admin-password".to_string()),
-        admin_sessions: Arc::new(DashSet::new()),
-        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(PathBuf::from("client-templates")),
         fetched_templates_dir: Arc::new(PathBuf::from("fetched-client-templates")),
     };
@@ -81,9 +78,29 @@ async fn full_pairing_and_relay_flow() {
     let mut host = connect(port).await;
     let mut controller = connect(port).await;
 
-    // Host account + device registration.
+    // Host account + device registration. As the first account ever
+    // created, the host becomes admin and registration auto-disables — so
+    // it re-enables registration (as admin, over the HTTP API) before the
+    // controller's own signup below.
     send(&mut host, ClientMessage::Register { email: "host@example.com".into(), password: "hunter2".into() }).await;
     assert!(matches!(recv(&mut host).await, ServerMessage::AuthOk { .. }));
+
+    let http = reqwest::Client::builder().cookie_store(true).build().expect("build http client");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let resp = http
+        .post(format!("{base_url}/api/v1/auth/login"))
+        .json(&serde_json::json!({ "email": "host@example.com", "password": "hunter2" }))
+        .send()
+        .await
+        .expect("admin login");
+    assert_eq!(resp.status(), 200);
+    let resp = http
+        .put(format!("{base_url}/api/v1/admin/registration"))
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await
+        .expect("re-enable registration");
+    assert_eq!(resp.status(), 200);
 
     send(&mut host, ClientMessage::RegisterDevice { name: "office-pc".into() }).await;
     let (device_id, otp) = match recv(&mut host).await {

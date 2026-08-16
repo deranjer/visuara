@@ -1,9 +1,11 @@
-//! End-to-end HTTP test for the admin settings UI and the public download
-//! endpoint: login gating, settings persistence, and that a downloaded
-//! "client" actually comes back with the configured server URL/device name
-//! patched into its embedded-config slot.
+//! End-to-end HTTP test for the admin settings API and the public download
+//! endpoint: the first registered account becomes admin, admin-only
+//! settings persistence works, and a downloaded "client" actually comes
+//! back with the configured server URL/device name patched into its
+//! embedded-config slot.
 
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,8 +13,6 @@ use visuara_common::embedded_config::{EmbeddedConfig, CONFIG_MAGIC, CONFIG_SLOT_
 use visuara_signaling::db::Db;
 use visuara_signaling::state::AppState;
 use visuara_signaling::turn::TurnConfig;
-
-const ADMIN_PASSWORD: &str = "supersecret";
 
 /// A stand-in for a real release binary: just enough bytes around the
 /// marker to prove the patch/serve logic works. The real byte-for-byte
@@ -35,9 +35,6 @@ async fn spawn_test_server(templates_dir: PathBuf) -> String {
         device_online: Arc::new(DashMap::new()),
         otp: Arc::new(DashMap::new()),
         sessions: Arc::new(DashMap::new()),
-        admin_password: Arc::new(ADMIN_PASSWORD.to_string()),
-        admin_sessions: Arc::new(DashSet::new()),
-        user_sessions: Arc::new(DashMap::new()),
         client_templates_dir: Arc::new(templates_dir),
         fetched_templates_dir: Arc::new(std::env::temp_dir().join(format!("visuara-test-fetched-{}", uuid::Uuid::new_v4()))),
     };
@@ -51,7 +48,7 @@ async fn spawn_test_server(templates_dir: PathBuf) -> String {
 }
 
 #[tokio::test]
-async fn admin_login_settings_and_download_round_trip() {
+async fn admin_bootstrap_settings_and_download_round_trip() {
     let templates_dir = std::env::temp_dir().join(format!("visuara-test-templates-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&templates_dir).expect("create temp templates dir");
     std::fs::write(templates_dir.join("windows-x86_64.exe"), fake_template_bytes()).expect("write fake template");
@@ -59,48 +56,62 @@ async fn admin_login_settings_and_download_round_trip() {
     let base_url = spawn_test_server(templates_dir.clone()).await;
     let client = reqwest::Client::builder().cookie_store(true).build().expect("build client");
 
-    // Settings page redirects to login when not authenticated.
-    let resp = client.get(format!("{base_url}/admin/settings")).send().await.expect("get settings unauth");
-    assert!(resp.url().as_str().ends_with("/admin"), "should have redirected to /admin, got {}", resp.url());
+    // Admin-only settings reject an unauthenticated request.
+    let resp = client.get(format!("{base_url}/api/v1/admin/settings")).send().await.expect("get settings unauth");
+    assert_eq!(resp.status(), 401);
 
-    // Wrong password doesn't authenticate.
+    // The first account ever registered becomes admin automatically.
     let resp = client
-        .post(format!("{base_url}/admin/login"))
-        .form(&[("password", "wrong")])
+        .post(format!("{base_url}/api/v1/auth/register"))
+        .json(&json!({ "email": "admin@example.com", "password": "hunter2" }))
         .send()
         .await
-        .expect("post wrong login");
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("Incorrect password"), "expected error message, got: {body}");
+        .expect("register first account");
+    assert_eq!(resp.status(), 200);
+    let account: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(account["role"], "admin");
 
-    // Correct password authenticates and lands on settings.
+    // Registration auto-disabled the moment the first account was created.
+    let resp = client.get(format!("{base_url}/api/v1/registration-status")).send().await.expect("registration status");
+    let status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status["enabled"], false);
+
+    // A second self-service registration is now rejected...
     let resp = client
-        .post(format!("{base_url}/admin/login"))
-        .form(&[("password", ADMIN_PASSWORD)])
+        .post(format!("{base_url}/api/v1/auth/register"))
+        .json(&json!({ "email": "second@example.com", "password": "swordfish" }))
         .send()
         .await
-        .expect("post correct login");
-    assert!(resp.url().as_str().ends_with("/admin/settings"), "expected to land on settings, got {}", resp.url());
+        .expect("second registration attempt");
+    assert_eq!(resp.status(), 403);
 
-    // Save settings.
+    // ...but the admin can still create accounts directly, bypassing the gate.
     let resp = client
-        .post(format!("{base_url}/admin/settings"))
-        .form(&[("server_url", "wss://visuara.example.com/ws"), ("default_device_name", "warehouse-01")])
+        .post(format!("{base_url}/api/v1/admin/accounts"))
+        .json(&json!({ "email": "second@example.com", "password": "swordfish" }))
         .send()
         .await
-        .expect("post settings");
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("Saved."), "expected save confirmation, got: {body}");
+        .expect("admin-created account");
+    assert_eq!(resp.status(), 201);
 
-    // Public download page reflects the configured server URL and lists the
-    // platform we dropped a template for.
-    let resp = client.get(format!("{base_url}/download")).send().await.expect("get download page");
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("wss://visuara.example.com/ws"));
-    assert!(body.contains("windows-x86_64"));
+    // Save settings as the now-authenticated admin.
+    let resp = client
+        .put(format!("{base_url}/api/v1/admin/settings"))
+        .json(&json!({ "server_url": "wss://visuara.example.com/ws", "default_device_name": "warehouse-01" }))
+        .send()
+        .await
+        .expect("save settings");
+    assert_eq!(resp.status(), 200);
+
+    // Public download listing reflects the configured server URL and lists
+    // the platform we dropped a template for.
+    let resp = client.get(format!("{base_url}/api/v1/download")).send().await.expect("get download listing");
+    let listing: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(listing["server_url"], "wss://visuara.example.com/ws");
+    assert!(listing["options"].as_array().unwrap().iter().any(|o| o["platform"] == "windows-x86_64" && o["available"] == true));
 
     // Downloading actually patches the template with the current settings.
-    let resp = client.get(format!("{base_url}/download/windows-x86_64")).send().await.expect("download");
+    let resp = client.get(format!("{base_url}/api/v1/download/windows-x86_64")).send().await.expect("download");
     assert_eq!(resp.status(), 200);
     let content_disposition = resp
         .headers()
@@ -118,7 +129,7 @@ async fn admin_login_settings_and_download_round_trip() {
     assert_eq!(config.device_name.as_deref(), Some("warehouse-01"));
 
     // A platform with no uploaded template 404s with a helpful message.
-    let resp = client.get(format!("{base_url}/download/linux-x86_64")).send().await.expect("download missing");
+    let resp = client.get(format!("{base_url}/api/v1/download/linux-x86_64")).send().await.expect("download missing");
     assert_eq!(resp.status(), 404);
 
     let _ = std::fs::remove_dir_all(&templates_dir);
